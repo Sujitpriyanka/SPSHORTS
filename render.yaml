@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: sp-shorts
+    runtime: node
+    plan: starter
+    buildCommand: node --check server.js
+    startCommand: node server.js
+    healthCheckPath: /healthz
+    envVars:
+      - key: SP_SHORTS_DATA
+        value: /var/data/sp-shorts
+    disk:
+      name: sp-shorts-data
+      mountPath: /var/data
+      sizeGB: 10
