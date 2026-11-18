@@ -117,10 +117,67 @@ function play(req,res,filename) {
     if (req.method === 'HEAD') return res.end();
     fs.createReadStream(file,{start,end}).on('error',()=>res.destroy()).pipe(res);
 }
+
+const rooms = new Map();
+function liveConfig() {
+    const url = process.env.LIVEKIT_URL || '';
+    const key = process.env.LIVEKIT_API_KEY || '';
+    const secret = process.env.LIVEKIT_API_SECRET || '';
+    return {url,key,secret,ready:/^wss:\/\/[a-z0-9.-]+(?::\d+)?\/?$/i.test(url) && !!key && !!secret};
+}
+function roomList() {
+    for (const [id,room] of rooms) if (Date.now()-room.updated>90000) rooms.delete(id);
+    return [...rooms.values()];
+}
+async function roomBody(req) {
+    let body='';
+    for await (const chunk of req) {
+        body+=chunk.toString();
+        if (Buffer.byteLength(body)>4096) throw error(413,'Room request is too large');
+    }
+    try { return JSON.parse(body || '{}'); } catch { throw error(400,'Invalid room request'); }
+}
+function roomToken(person,room) {
+    const config=liveConfig();
+    if (!config.ready) throw error(503,'Live audio is not configured on the server.');
+    const now=Math.floor(Date.now()/1000);
+    const host=room.ownerId===person.id;
+    const publish=host || room.mode==='Audio';
+    const encode=value=>Buffer.from(JSON.stringify(value)).toString('base64url');
+    const payload={iss:config.key,sub:person.id,name:person.name,nbf:now-5,exp:now+600,
+        video:{room:room.id,roomJoin:true,canSubscribe:true,canPublish:publish,
+            canPublishData:true,canPublishSources:host && room.mode==='Live'?['camera','microphone']:['microphone']}};
+    const unsigned=encode({alg:'HS256',typ:'JWT'})+'.'+encode(payload);
+    const token=unsigned+'.'+crypto.createHmac('sha256',config.secret).update(unsigned).digest('base64url');
+    return {url:config.url,token,room,role:host?'host':'guest',expiresAt:(now+600)*1000};
+}
+
 const server = http.createServer(async (req,res) => {
     try {
         const url = new URL(req.url,'http://localhost');
-        if (req.method==='GET' && url.pathname==='/healthz') return reply(res,200,{ok:true,service:'sp-shorts'});
+        if (req.method==='GET' && url.pathname==='/healthz') return reply(res,200,{ok:true,service:'sp-shorts',livekitConfigured:liveConfig().ready});
+        if (req.method==='GET' && url.pathname==='/api/rooms') return reply(res,200,{enabled:liveConfig().ready,rooms:roomList()});
+        if (req.method==='POST' && ['/api/rooms','/api/rooms/join','/api/rooms/heartbeat','/api/rooms/leave'].includes(url.pathname)) {
+            const person=authenticated(req);
+            const body=await roomBody(req);
+            roomList();
+            if (url.pathname==='/api/rooms') {
+                if (!liveConfig().ready) throw error(503,'Live audio is not configured on the server.');
+                if (!['Live','Audio'].includes(body.mode)) throw error(400,'Choose Live or Audio');
+                const id='sp-'+person.id;
+                const room={id,ownerId:person.id,host:publicUser(person),mode:body.mode,
+                    title:String(body.title || person.name+"'s room").trim().slice(0,80),updated:Date.now()};
+                rooms.set(id,room);
+                return reply(res,201,roomToken(person,room));
+            }
+            const room=rooms.get(String(body.roomId || ''));
+            if (!room) throw error(404,'This live room has ended.');
+            if (url.pathname==='/api/rooms/join') return reply(res,200,roomToken(person,room));
+            if (room.ownerId!==person.id) throw error(403,'Only the host can update this room.');
+            if (url.pathname==='/api/rooms/leave') rooms.delete(room.id);
+            else room.updated=Date.now();
+            return reply(res,200,{ok:true});
+        }
         if (req.method==='GET' && url.pathname==='/api/catalog') return reply(res,200,{
             users:users().map(publicUser),videos:Object.values(db.videos).sort((a,b)=>b.created-a.created)
         });
