@@ -54,7 +54,8 @@ const server=http.createServer(async(req,res)=>{try{
  const actor=await authenticated(req,url);rate(actor.id);
  if(req.method==='GET'&&url.pathname==='/api/social/notifications'){
   const events=Object.values(db.events).filter(n=>n.targetId===actor.id).sort((a,b)=>b.created-a.created).slice(0,200);
-  return send(res,200,{epoch,events,removed:Object.entries(db.removed).filter(([,n])=>n.targetId===actor.id).map(([id])=>id)});
+  const actors={};events.forEach(n=>actors[n.actorId]=n.actor);
+  return send(res,200,{epoch,actors,events:events.map(({actor,...n})=>n),removed:Object.entries(db.removed).filter(([,n])=>n.targetId===actor.id).map(([id])=>id)});
  }
  if(req.method!=='POST')throw error(405,'Method not allowed');
  const data=await body(req);
